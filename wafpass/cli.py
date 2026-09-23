@@ -12,7 +12,7 @@ from typing import List
 
 import typer
 
-from wafpass import __name_full__, __version__
+from wafpass import __name_full__, __version__, run_scan as _public_run_scan
 from wafpass.engine import filter_by_severity, run_controls
 from wafpass.iac import registry
 from wafpass.iac.base import IaCState
@@ -20,6 +20,13 @@ from wafpass.loader import load_controls
 from wafpass.models import Report
 from wafpass.reporter import print_report, print_summary_only
 from wafpass.waivers import DEFAULT_SKIP_FILE, apply_waivers, load_waivers
+
+# Optional web dependencies for init --mode dashboard health checks
+try:
+    import httpx
+    _HTTPX_AVAILABLE = True
+except ImportError:
+    _HTTPX_AVAILABLE = False
 
 _DEFAULT_STATE_DIR = Path(".wafpass-state")
 
@@ -58,6 +65,49 @@ def _pid_file_remove() -> None:
         _UI_PID_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+# ── Demo IaC generator ─────────────────────────────────────────────────────────
+
+_DEMO_MAIN_TF = '''\
+# WAF++ PASS demo file — intentionally contains a public S3 bucket.
+# This file is generated for local scanning only; do not deploy it to AWS.
+
+resource "aws_s3_bucket" "example" {{
+  bucket = "{bucket_name}"
+}}
+
+resource "aws_s3_bucket_public_access_block" "example" {{
+  bucket = aws_s3_bucket.example.id
+
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}}
+'''
+
+
+def _generate_demo_bucket_name() -> str:
+    """Return a unique, obviously-local S3 bucket name for demo scans."""
+    import secrets
+    suffix = secrets.token_hex(4)
+    return f"wafpass-demo-{suffix}"
+
+
+def _write_demo_main_tf(dest_dir: Path, bucket_name: str | None = None) -> Path:
+    """Write a deliberately non-compliant demo main.tf into *dest_dir*.
+
+    The generated bucket name is unique and clearly local-only, avoiding
+    collisions with real AWS buckets while still producing a predictable
+    FAIL on public-access controls.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = bucket_name or _generate_demo_bucket_name()
+    main_tf = dest_dir / "main.tf"
+    main_tf.write_text(_DEMO_MAIN_TF.format(bucket_name=name), encoding="utf-8")
+    return main_tf
+
 
 app = typer.Typer(
     name="wafpass",
@@ -585,9 +635,9 @@ def check(
     # ── Output ─────────────────────────────────────────────────────────────────
     if output == "console":
         if summary_only:
-            print_summary_only(report)
+            print_summary_only(report, schema.score)
         else:
-            print_report(report, verbose=verbose, diff=run_diff)
+            print_report(report, verbose=verbose, diff=run_diff, score=schema.score)
     elif output == "pdf":
         try:
             from wafpass.pdf_reporter import generate_pdf
@@ -620,7 +670,7 @@ def check(
             save_baseline_file(snap, save_baseline_path)
             typer.echo(f"Baseline saved to: {save_baseline_path}")
         # Also print summary to console so CI pipelines see the result
-        print_summary_only(report)
+        print_summary_only(report, schema.score)
     elif output == "json":
         _json_str = schema.model_dump_json(indent=2)
         typer.echo(_json_str)
@@ -817,6 +867,505 @@ def check(
         raise typer.Exit(code=1)
     elif fail_on_lower == "any" and (report.total_fail > 0 or report.total_skip > 0):
         raise typer.Exit(code=1)
+
+
+# ── Demo command ─────────────────────────────────────────────────────────────────
+
+_DEMO_PROJECT = "wafpass-demo"
+_DEMO_DIR = Path.home() / ".wafpass" / "demo"
+_DEMO_CONTROLS_DIR = Path.home() / ".wafpass" / "controls"
+
+
+def _ensure_demo_controls(controls_dir: Path) -> Path:
+    """Return a controls directory guaranteed to contain controls.
+
+    If *controls_dir* exists and is non-empty, use it. Otherwise fall back to
+    the bundled controls next to the CLI (development layout) or the user's
+    shared cache directory. Raises typer.Exit if no controls can be found.
+    """
+    candidates = [
+        controls_dir,
+        _DEMO_CONTROLS_DIR,
+        Path("controls"),
+    ]
+    for candidate in candidates:
+        if candidate.exists() and any(candidate.glob("*.yml")):
+            return candidate
+
+    typer.echo(
+        "ERROR: No WAF++ controls found. "
+        "Run from a directory that contains a 'controls/' folder, "
+        "or pass --controls-dir.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+@app.command()
+def demo(
+    controls_dir: Path = typer.Option(
+        Path("controls"),
+        "--controls-dir",
+        help="Path to WAF++ YAML control files.",
+    ),
+    server_url: str = typer.Option(
+        "",
+        "--server-url",
+        envvar="WAFPASS_SERVER_URL",
+        help=(
+            "wafpass-server URL to POST the demo result to. "
+            "Equivalent to --push on 'wafpass check'."
+        ),
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        envvar="WAFPASS_API_KEY",
+        help=(
+            "API key sent as 'X-Api-Key' when posting to --server-url. "
+            "Not needed after 'wafpass login'."
+        ),
+    ),
+    no_push: bool = typer.Option(
+        False,
+        "--no-push",
+        help="Run the demo locally without pushing to the server.",
+    ),
+    no_state: bool = typer.Option(
+        False,
+        "--no-state",
+        help="Disable automatic run state saving for the demo scan.",
+    ),
+) -> None:
+    """Run a sample scan and optionally seed the dashboard with the result."""
+    from wafpass.state import generate_run_id
+
+    # ── Prepare demo project ───────────────────────────────────────────────────
+    _DEMO_DIR.mkdir(parents=True, exist_ok=True)
+    _write_demo_main_tf(_DEMO_DIR)
+
+    effective_controls_dir = _ensure_demo_controls(controls_dir)
+
+    # ── Run scan ───────────────────────────────────────────────────────────────
+    typer.echo("Running WAF++ PASS demo scan...", err=True)
+    try:
+        schema = _public_run_scan(
+            paths=[str(_DEMO_DIR)],
+            controls_dir=str(effective_controls_dir),
+        )
+    except Exception as exc:
+        typer.echo(f"ERROR running demo scan: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    # Enrich metadata for the demo result
+    schema.project = _DEMO_PROJECT
+    schema.branch = "main"
+    schema.stage = "demo"
+    schema.triggered_by = "local"
+    schema.iac_framework = "terraform"
+
+    # ── Optional state snapshot ─────────────────────────────────────────────
+    run_id = ""
+    state_dir = _DEFAULT_STATE_DIR
+    if not no_state:
+        from wafpass.state import build_run_snapshot, save_run
+        from wafpass.models import Report as ReportModel
+
+        # Build a minimal Report for state saving from the schema's totals.
+        report = ReportModel(
+            path=str(_DEMO_DIR),
+            controls_loaded=schema.controls_loaded,
+            controls_run=schema.controls_run,
+            results=[],
+            source_paths=[str(_DEMO_DIR)],
+        )
+        snapshot = build_run_snapshot(
+            report,
+            run_id=generate_run_id(),
+            iac_plugin="terraform",
+            stage="demo",
+        )
+        snapshot["totals"] = {
+            "controls_run": schema.controls_run,
+            "pass": sum(1 for f in schema.findings if f.status == "PASS"),
+            "fail": sum(1 for f in schema.findings if f.status == "FAIL"),
+            "skip": sum(1 for f in schema.findings if f.status == "SKIP"),
+            "waived": sum(1 for f in schema.findings if f.status == "WAIVED"),
+        }
+        save_run(snapshot, state_dir)
+        run_id = snapshot["run_id"]
+
+    # ── Print friendly summary ───────────────────────────────────────────────
+    from wafpass.reporter import _compute_score
+
+    score = schema.score
+    pass_count = sum(1 for f in schema.findings if f.status == "PASS")
+    fail_count = sum(1 for f in schema.findings if f.status == "FAIL")
+    skip_count = sum(1 for f in schema.findings if f.status == "SKIP")
+
+    from rich.console import Console as _RichConsole
+
+    _rc = _RichConsole()
+    _rc.print("")
+    _rc.print(f"[bold cyan]WAF++ PASS demo[/bold cyan]  [dim]v{__version__}[/dim]")
+    _rc.print(f"  Project: {_DEMO_PROJECT}")
+    _rc.print(f"  Score:   {score}/100")
+    _rc.print(
+        f"  Findings: [green]✓ PASS {pass_count}[/green]  "
+        f"[red]✗ FAIL {fail_count}[/red]  "
+        f"[yellow]─ SKIP {skip_count}[/yellow]"
+    )
+    _rc.print("")
+
+    # ── Push to server ────────────────────────────────────────────────────────
+    dashboard_url = "http://localhost:3000"
+    push_url: str | None = None
+    if not no_push and server_url:
+        try:
+            import httpx as _httpx
+            from wafpass.auth import resolve_push_target
+
+            push_arg = server_url
+            _resolved_url, _auto_headers = resolve_push_target(push_arg)
+            if push_arg == "@" and _resolved_url is None:
+                typer.echo(
+                    "ERROR: --server-url @ requires an active login session. "
+                    "Run 'wafpass login <server-url>' first.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+
+            push_url = _resolved_url or push_arg
+            _push_headers: dict[str, str] = {
+                "Content-Type": "application/json",
+                **_auto_headers,
+            }
+            if api_key:
+                _push_headers.pop("Authorization", None)
+                _push_headers["X-Api-Key"] = api_key
+
+            json_payload = schema.model_dump_json(indent=2)
+            _resp = _httpx.post(
+                push_url,
+                content=json_payload,
+                headers=_push_headers,
+                timeout=30,
+            )
+            _resp.raise_for_status()
+            data = _resp.json()
+            run_summary = data.get("data", {})
+            server_run_id = run_summary.get("id", "")
+            dashboard_url = f"http://localhost:3000/runs/{server_run_id}"
+            typer.echo(f"Pushed to {push_url}  →  HTTP {_resp.status_code}", err=True)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            typer.echo(f"WARNING: Could not push demo result to server: {exc}", err=True)
+            dashboard_url = "http://localhost:3000"
+
+    # ── Final CTA ──────────────────────────────────────────────────────────────
+    _rc.print(f"Open the dashboard: {dashboard_url}")
+    if not server_url:
+        _rc.print("")
+        _rc.print(
+            "[dim]Re-run with --server-url http://localhost:8000/runs "
+            "to seed the dashboard with this scan.[/dim]"
+        )
+    if run_id:
+        _rc.print(f"[dim]Local run state saved: run-id {run_id}[/dim]")
+
+
+# ── Init command ─────────────────────────────────────────────────────────────────
+
+_INIT_STACK_DIR = Path.home() / ".wafpass" / "stack"
+_INIT_DEMO_DIR = Path("wafpass-demo")
+_INIT_CONTROLS_CACHE = Path.home() / ".wafpass" / "controls"
+
+
+_INIT_REQUIRED_ENVS = [
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_DB",
+    "WAFPASS_ENV",
+    "WAFPASS_JWT_SECRET",
+    "WAFPASS_JWT_EXPIRE_MINUTES",
+    "WAFPASS_JWT_REFRESH_DAYS",
+    "WAFPASS_ADMIN_USERNAME",
+    "WAFPASS_ADMIN_PASSWORD",
+    "WAFPASS_API_KEY",
+    "WAFPASS_INTERNAL_API_KEY",
+    "WAFPASS_CONTROLS_DIR",
+    "WAFPASS_BASE_PATH",
+    "KEYCLOAK_DB",
+    "KEYCLOAK_DB_USER",
+    "KEYCLOAK_DB_PASSWORD",
+    "KEYCLOAK_ADMIN_USER",
+    "KEYCLOAK_ADMIN_PASSWORD",
+]
+
+
+def _random_secret(length: int = 32) -> str:
+    """Return a URL-safe random secret string."""
+    import secrets
+    return secrets.token_urlsafe(length)
+
+
+def _locate_compose_file() -> Path | None:
+    """Find a usable docker-compose.yml in the current directory or monorepo root."""
+    candidates = [
+        Path("docker-compose.yml"),
+        Path.cwd().parent / "docker-compose.yml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            # Sanity check: file should mention the wafpass-server service.
+            text = candidate.read_text(encoding="utf-8")
+            if "wafpass-server:" in text:
+                return candidate
+    return None
+
+
+def _link_compose_file(stack_dir: Path, compose_file: Path) -> None:
+    """Copy (or symlink) the compose file into the stack directory.
+
+    A symlink is used when the source is writeable (development layout); a copy
+    is used when the source is read-only or when symlinks are unsupported.
+    """
+    dest = stack_dir / "docker-compose.yml"
+    try:
+        dest.symlink_to(compose_file.resolve())
+    except OSError:
+        import shutil
+        shutil.copy2(compose_file, dest)
+
+
+def _generate_env_file(stack_dir: Path) -> dict[str, str]:
+    """Create a complete .env file with random secrets for the Docker stack."""
+    env: dict[str, str] = {
+        # ── Database ──────────────────────────────────────────────────────────
+        "POSTGRES_USER": "wafpass",
+        "POSTGRES_PASSWORD": _random_secret(24),
+        "POSTGRES_DB": "wafpass",
+        "POSTGRES_PORT": "5432",
+
+        # ── Server / runtime ─────────────────────────────────────────────────
+        "WAFPASS_ENV": "local",
+        "WAFPASS_JWT_SECRET": _random_secret(48),
+        "WAFPASS_JWT_EXPIRE_MINUTES": "60",
+        "WAFPASS_JWT_REFRESH_DAYS": "7",
+        "WAFPASS_ADMIN_USERNAME": "admin",
+        "WAFPASS_ADMIN_PASSWORD": _random_secret(16),
+        "WAFPASS_API_KEY": _random_secret(32),
+        "WAFPASS_INTERNAL_API_KEY": _random_secret(32),
+        "WAFPASS_CONTROLS_DIR": "/app/controls",
+        "WAFPASS_BASE_PATH": "/app",
+
+        # ── Keycloak dev defaults ──────────────────────────────────────────────
+        "KEYCLOAK_DB": "keycloak",
+        "KEYCLOAK_DB_USER": "keycloak",
+        "KEYCLOAK_DB_PASSWORD": _random_secret(24),
+        "KEYCLOAK_ADMIN_USER": "admin",
+        "KEYCLOAK_ADMIN_PASSWORD": _random_secret(16),
+        "KEYCLOAK_PORT": "8080",
+    }
+    return env
+
+
+def _write_env_file(stack_dir: Path, env: dict[str, str]) -> Path:
+    """Write an .env file to *stack_dir*. Existing files are preserved unless
+    *stack_dir* is empty or the user explicitly requested overwrite."""
+    stack_dir.mkdir(parents=True, exist_ok=True)
+    env_path = stack_dir / ".env"
+
+    lines = [
+        "# WAF++ PASS local stack — generated by wafpass init",
+        "# https://waf2p.dev/wafpass-install/",
+        "",
+    ]
+    for key, value in env.items():
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_path
+
+
+def _check_docker_available() -> None:
+    """Ensure docker and docker compose are available."""
+    for cmd in ["docker", "docker compose"]:
+        try:
+            subprocess.run(cmd.split(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except Exception as exc:
+            typer.echo(f"ERROR: '{cmd}' is required for dashboard mode but is not available.", err=True)
+            raise typer.Exit(code=2) from exc
+
+
+def _wait_for_server(base_url: str, timeout: int = 120) -> bool:
+    """Poll the server /health endpoint until it responds or timeout."""
+    if not _HTTPX_AVAILABLE:
+        return False
+
+    import httpx
+    deadline = time.time() + timeout
+    url = f"{base_url.rstrip('/')}/health"
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(url, timeout=5)
+            if resp.status_code < 500:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def _open_browser(url: str) -> None:
+    """Best-effort attempt to open a URL in the default browser."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["open", url], check=False)
+        elif sys.platform == "win32":
+            subprocess.run(["start", url], shell=True, check=False)
+        else:
+            subprocess.run(["xdg-open", url], check=False)
+    except Exception:
+        pass
+
+
+@app.command()
+def init(
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="Setup mode: cli, dashboard, or ask (interactive).",
+    ),
+    controls_dir: Path = typer.Option(
+        Path("controls"),
+        "--controls-dir",
+        help="Path to WAF++ YAML control files (used by --mode cli).",
+    ),
+    stack_dir: Path = typer.Option(
+        _INIT_STACK_DIR,
+        "--stack-dir",
+        help="Directory where the Docker stack and .env will live.",
+    ),
+    demo_dir: Path = typer.Option(
+        _INIT_DEMO_DIR,
+        "--demo-dir",
+        help="Directory for the CLI demo project (used by --mode cli).",
+    ),
+    server_url: str = typer.Option(
+        "http://localhost:8000/runs",
+        "--server-url",
+        help="wafpass-server URL to push the demo result to.",
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        envvar="WAFPASS_API_KEY",
+        help="API key used when pushing the demo result to the server.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Accept defaults and do not prompt for input.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show the plan without changing anything.",
+    ),
+) -> None:
+    """Guided first-time setup for WAF++ PASS.
+
+    Defaults to an interactive prompt that asks whether to set up the CLI-only
+    quickstart or the full local dashboard. Use --mode to skip the prompt.
+    """
+    from rich.console import Console as _RichConsole
+
+    rc = _RichConsole()
+
+    # ── Choose mode ───────────────────────────────────────────────────────────
+    resolved_mode = mode
+    if not resolved_mode:
+        if yes:
+            resolved_mode = "cli"
+        else:
+            rc.print("Welcome to WAF++ PASS. Choose your first setup:")
+            rc.print("  [1] CLI-only scan (recommended, ~30 seconds)")
+            rc.print("  [2] Full local dashboard (Docker required)")
+            choice = input("Choice [1]: ").strip() or "1"
+            resolved_mode = "dashboard" if choice == "2" else "cli"
+
+    if resolved_mode not in ("cli", "dashboard"):
+        typer.echo(f"ERROR: --mode must be 'cli' or 'dashboard', got '{resolved_mode}'", err=True)
+        raise typer.Exit(code=2)
+
+    rc.print(f"[bold cyan]wafpass init --mode {resolved_mode}[/bold cyan]")
+
+    # ── Shared prep ───────────────────────────────────────────────────────────
+    if dry_run:
+        rc.print("[yellow]DRY-RUN:[/yellow] showing plan; no changes will be made.")
+
+    if resolved_mode == "cli":
+        # ── CLI-only setup ────────────────────────────────────────────────────
+        effective_controls = _ensure_demo_controls(controls_dir)
+        if not dry_run:
+            demo_dir.mkdir(parents=True, exist_ok=True)
+            _write_demo_main_tf(demo_dir)
+            rc.print(f"Demo project created: {demo_dir.resolve()}")
+            rc.print(f"Controls loaded from: {effective_controls.resolve()}")
+            rc.print("")
+            rc.print("Run your first scan with:")
+            rc.print(f"  [bold]wafpass check {demo_dir} --controls-dir {effective_controls}[/bold]")
+        else:
+            rc.print(f"Would create demo project in {demo_dir.resolve()}")
+            rc.print(f"Would use controls from {effective_controls.resolve()}")
+
+    elif resolved_mode == "dashboard":
+        # ── Dashboard setup ─────────────────────────────────────────────────
+        _check_docker_available()
+
+        compose_file = _locate_compose_file()
+
+        if not dry_run:
+            stack_dir.mkdir(parents=True, exist_ok=True)
+            env = _generate_env_file(stack_dir)
+            env_path = _write_env_file(stack_dir, env)
+
+            if compose_file:
+                _link_compose_file(stack_dir, compose_file)
+
+            rc.print(f"Stack directory: {stack_dir.resolve()}")
+            rc.print(f"Environment file: {env_path}")
+            if compose_file:
+                rc.print(f"Compose file: {stack_dir / 'docker-compose.yml'}")
+            rc.print("")
+            rc.print(
+                "[yellow]Admin password generated — save it now:[/yellow] "
+                f"[bold]{env['WAFPASS_ADMIN_PASSWORD']}[/bold]"
+            )
+            rc.print("")
+            if compose_file:
+                rc.print("Start the stack with:")
+                rc.print(f"  [bold]cd {stack_dir} && docker compose up -d[/bold]")
+                rc.print("")
+                rc.print("Then seed the dashboard with:")
+                rc.print(f"  [bold]wafpass demo --server-url {server_url} --api-key {env['WAFPASS_API_KEY']}[/bold]")
+            else:
+                rc.print(
+                    "[yellow]No docker-compose.yml found in the current directory.[/yellow] "
+                    "Download the WAF++ stack from https://github.com/WAF2p/pass, place it here, "
+                    "then run:"
+                )
+                rc.print(f"  [bold]cd <stack-dir> && docker compose --env-file {env_path} up -d[/bold]")
+        else:
+            rc.print(f"Would create stack directory {stack_dir.resolve()}")
+            rc.print("Would generate .env with random secrets")
+            if compose_file:
+                rc.print(f"Would link compose file {compose_file} into the stack directory")
+
+    rc.print("")
+    rc.print("[green]Setup complete.[/green]")
 
 
 # ── Shared pipeline helper ──────────────────────────────────────────────────────

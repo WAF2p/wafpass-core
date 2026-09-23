@@ -81,6 +81,11 @@ controls/*.yaml
 /test.tmp
 /.wafpass-state/
 /.wafpass-server-controls/
+/insomnia/Insomnia_wafpass-server.json
+/tests/test_demo_command.py
+/tests/test_init_command.py
+/tests/test_installer.py
+/tests/test_reporter.py
 
 # Insomnia workspace exports (user-local API testing config)
 /insomnia/
