@@ -89,3 +89,10 @@ controls/*.yaml
 
 # Insomnia workspace exports (user-local API testing config)
 /insomnia/
+
+# SBOM / CNCF artifacts (generated in CI, not committed)
+sbom.*
+licenses.json
+requirements.sbom.txt
+.sbom-venv/
+.tools-venv/
