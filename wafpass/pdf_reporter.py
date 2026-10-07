@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,7 +54,11 @@ except Exception:
     _LOGO_IMG = None  # graceful fallback if image not found
 
 # ── Regulatory logos directory ────────────────────────────────────────────────
-_REG_LOGOS_DIR = Path(__file__).parent.parent / "assets" / "regulatory"
+# Allow operators (e.g. the Docker image) to mount or copy logos under a
+# well-known path, while keeping the source-tree default for local runs.
+_REG_LOGOS_DIR = Path(
+    os.environ.get("WAFPASS_ASSETS_DIR", Path(__file__).parent.parent / "assets")
+) / "regulatory"
 
 # Cache of loaded regulatory logo ImageReaders (None means image not found)
 _REG_LOGO_CACHE: dict[str, "ImageReader | None"] = {}
@@ -1864,6 +1869,7 @@ def _build_framework_map(report: Report) -> dict[str, dict]:
 _PRIORITY_FRAMEWORKS: list[str] = [
     "GDPR",
     "BSI C5:2020",
+    "BSI C3A:2026",
     "ISO 27001:2022",
     "EUCS (ENISA)",
     "SOC 2",
