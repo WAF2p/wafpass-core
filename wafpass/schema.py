@@ -267,6 +267,11 @@ class WafpassResultSchema(BaseModel):
         ),
     )
 
+    completed_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp when the scan finished. Used by the dashboard for duration metrics.",
+    )
+
     # ── Local attestation (optional, populated via --validate) ────────────────────
     attestation: Optional[LocalAttestationSchema] = Field(
         default=None,

@@ -64,11 +64,11 @@ _PillarLiteral = Literal[
     "sovereign",
     "agentic",
 ]
-_SeverityLiteral = Literal["critical", "high", "medium", "low"]
+_SeverityLiteral = Literal["critical", "high", "medium", "low", "informational"]
 _TypeLiteral = Literal[
     "governance", "configuration", "iac", "network", "identity", "data", "cost"
 ]
-_EngineLiteral = Literal["terraform", "checkov", "manual", "config"]
+_EngineLiteral = Literal["terraform", "checkov", "manual", "config", "cdk", "documentation"]
 
 
 # ── Sub-models ────────────────────────────────────────────────────────────────

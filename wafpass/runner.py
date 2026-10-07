@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +305,8 @@ def run_scan(config: ScanConfig) -> tuple[Report, WafpassResultSchema]:
     git_sha = config.git_sha or _git(["git", "rev-parse", "HEAD"])
     triggered_by = _detect_triggered_by(config.triggered_by)
 
+    completed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
     result = WafpassResultSchema(
         project=config.project,
         branch=branch,
@@ -324,6 +327,7 @@ def run_scan(config: ScanConfig) -> tuple[Report, WafpassResultSchema]:
         secret_findings=secret_schema_findings,
         plan_changes=plan_changes,
         source_snapshot=source_snapshot,
+        completed_at=completed_at,
     )
 
     return report, result
