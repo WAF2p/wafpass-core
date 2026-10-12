@@ -245,6 +245,19 @@ def check(
             "Can also be set via the WAFPASS_API_KEY environment variable."
         ),
     ),
+    mandate: str | None = typer.Option(
+        None,
+        "--mandate",
+        envvar="WAFPASS_MANDATE",
+        help=(
+            "Mandate (tenant) id to tag this push with, sent as 'X-Mandant-Context'. "
+            "Only takes effect for a '--push @' Bearer-token push by a holding_admin/"
+            "holding_viewer/group_admin/group_viewer account — run 'wafpass mandates' "
+            "to list the ids you're allowed to use. Ignored (and unnecessary) for an "
+            "ordinary mandate-scoped account or an --api-key push, where the mandate "
+            "is already fixed. Can also be set via the WAFPASS_MANDATE environment variable."
+        ),
+    ),
     validation_url: str | None = typer.Option(
         None,
         "--validation-url",
@@ -690,7 +703,14 @@ def check(
                 import httpx as _httpx
                 from wafpass.auth import resolve_push_target, get_valid_credentials
 
-                _push_url, _auto_headers = resolve_push_target(push)
+                if mandate and api_key:
+                    typer.echo(
+                        "WARNING: --mandate has no effect together with --api-key — "
+                        "a key's mandate is fixed when it's created, not at push time.",
+                        err=True,
+                    )
+
+                _push_url, _auto_headers = resolve_push_target(push, mandate=mandate)
 
                 if push == "@" and _push_url is None:
                     typer.echo(
@@ -707,6 +727,7 @@ def check(
                 # Explicit --api-key always wins over the stored Bearer token
                 if api_key:
                     _push_headers.pop("Authorization", None)
+                    _push_headers.pop("X-Mandant-Context", None)
                     _push_headers["X-Api-Key"] = api_key
 
                 _resp = _httpx.post(
@@ -926,6 +947,17 @@ def demo(
             "Not needed after 'wafpass login'."
         ),
     ),
+    mandate: str | None = typer.Option(
+        None,
+        "--mandate",
+        envvar="WAFPASS_MANDATE",
+        help=(
+            "Mandate (tenant) id to tag this push with (same as 'wafpass check --mandate'). "
+            "Only takes effect for a Bearer-token push by a holding_admin/holding_viewer/"
+            "group_admin/group_viewer account — run 'wafpass mandates' to list the ids "
+            "you're allowed to use."
+        ),
+    ),
     no_push: bool = typer.Option(
         False,
         "--no-push",
@@ -1025,8 +1057,15 @@ def demo(
             import httpx as _httpx
             from wafpass.auth import resolve_push_target
 
+            if mandate and api_key:
+                typer.echo(
+                    "WARNING: --mandate has no effect together with --api-key — "
+                    "a key's mandate is fixed when it's created, not at push time.",
+                    err=True,
+                )
+
             push_arg = server_url
-            _resolved_url, _auto_headers = resolve_push_target(push_arg)
+            _resolved_url, _auto_headers = resolve_push_target(push_arg, mandate=mandate)
             if push_arg == "@" and _resolved_url is None:
                 typer.echo(
                     "ERROR: --server-url @ requires an active login session. "
@@ -1042,6 +1081,7 @@ def demo(
             }
             if api_key:
                 _push_headers.pop("Authorization", None)
+                _push_headers.pop("X-Mandant-Context", None)
                 _push_headers["X-Api-Key"] = api_key
 
             json_payload = schema.model_dump_json(indent=2)
@@ -2300,6 +2340,10 @@ def cmd_login(
     rc.print(f"   Server   : {creds.server_url}")
     rc.print(f"   Token    : valid until {_exp_str}  [dim](auto-refreshed via refresh token)[/dim]")
     rc.print(f"   Stored   : {_CREDS_FILE}")
+    if creds.holding_role:
+        rc.print(f"   Holding  : [magenta]{creds.holding_role}[/magenta] — run [bold]wafpass mandates[/bold] to list mandates you can push as")
+    elif creds.mandant_id:
+        rc.print(f"   Mandate  : {creds.mandant_id}")
     rc.print()
     rc.print("  Push scan results using [bold]--push @[/bold] to use this server automatically:")
     rc.print(f"  [dim]wafpass check ./infra --output json --push @[/dim]")
@@ -2350,6 +2394,11 @@ def cmd_whoami() -> None:
     table.add_row("Server",   raw.server_url)
     table.add_row("Username", f"[bold]{raw.username}[/bold]")
     table.add_row("Role",     f"[cyan]{raw.role}[/cyan]")
+    if raw.holding_role:
+        table.add_row("Holding role", f"[magenta]{raw.holding_role}[/magenta]")
+        table.add_row("Mandate", raw.mandant_id or "[dim](none — pass --mandate on push)[/dim]")
+    elif raw.mandant_id:
+        table.add_row("Mandate", raw.mandant_id)
 
     try:
         exp = datetime.fromisoformat(raw.expires_at)
@@ -2376,6 +2425,8 @@ def cmd_whoami() -> None:
     rc.print(table)
     rc.print()
     rc.print("  Use [bold]--push @[/bold] to push scan results to this server.")
+    if raw.holding_role:
+        rc.print("  Use [bold]--mandate <ID>[/bold] on push to act as a specific mandate — see [bold]wafpass mandates[/bold].")
 
 
 # ── wafpass evidence ───────────────────────────────────────────────────────────
@@ -2399,6 +2450,69 @@ def _require_creds():
         )
         raise typer.Exit(code=1)
     return creds
+
+
+@app.command("mandates")
+def cmd_mandates() -> None:
+    """List the mandates you can push a run as, via --mandate.
+
+    Only meaningful for a holding_admin/holding_viewer/group_admin/
+    group_viewer account — an ordinary mandate-scoped user has exactly one
+    mandate and never needs --mandate at all. Requires an active login
+    session ('wafpass login' first) — this is a Bearer-token concept;
+    an --api-key push's mandate is fixed when the key is created instead
+    (ask your holding_admin for a key already scoped to the right one).
+    """
+    import httpx as _httpx
+    from rich.console import Console
+    from rich.table import Table
+
+    rc = Console()
+    creds = _require_creds()
+
+    url = f"{creds.server_url}/api/v1/admin/mandants/switchable"
+    headers = {"Authorization": creds.bearer()}
+
+    try:
+        resp = _httpx.get(url, headers=headers, timeout=15)
+        if resp.status_code == 401:
+            creds = _require_creds()
+            headers["Authorization"] = creds.bearer()
+            resp = _httpx.get(url, headers=headers, timeout=15)
+    except Exception as exc:
+        rc.print(f"[red]Request failed: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    if resp.status_code == 403:
+        rc.print(
+            "[yellow]Your account has no holding-wide or group role — you always push "
+            "as your own mandate, --mandate isn't needed.[/yellow]"
+        )
+        return
+    if resp.status_code != 200:
+        rc.print(f"[red]Request failed: HTTP {resp.status_code}[/red]")
+        raise typer.Exit(code=1)
+
+    mandates = resp.json().get("data", [])
+    if not mandates:
+        rc.print("[yellow]No mandates found.[/yellow]")
+        return
+
+    tbl = Table(
+        title=f"Mandates you can push as — {creds.server_url}",
+        show_lines=False,
+        header_style="bold white on dark_blue",
+    )
+    tbl.add_column("ID", style="dim")
+    tbl.add_column("Name", style="bold white")
+    tbl.add_column("Slug", style="cyan")
+
+    for m in mandates:
+        tbl.add_row(str(m.get("id", "")), m.get("name") or "—", m.get("slug") or "—")
+
+    rc.print(tbl)
+    rc.print()
+    rc.print("  Use [bold]--mandate <ID>[/bold] on 'wafpass check --push @' to act as one of these.")
 
 
 @evidence_app.command("lock")

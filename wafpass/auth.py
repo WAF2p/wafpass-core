@@ -26,6 +26,14 @@ class Credentials:
     username: str
     role: str
     expires_at: str        # ISO-8601 UTC — from JWT `exp` claim
+    # Multi-mandant (wafpass-server's ADR-003/ADR-004) — present only once
+    # the server has multi-mandant mode active. mandant_id is this user's
+    # own mandate (None for a holding-only holding_admin/holding_viewer
+    # account); holding_role is None | "holding_admin" | "holding_viewer" |
+    # "group_admin" | "group_viewer". Defaults keep an older
+    # credentials.json (written before these fields existed) loading fine.
+    mandant_id: str | None = None
+    holding_role: str | None = None
 
     def is_expired(self) -> bool:
         try:
@@ -100,13 +108,16 @@ def do_login(server_url: str, username: str, password: str) -> Credentials:
     )
     resp.raise_for_status()
     data = resp.json()
+    user_data = data.get("user", {})
     creds = Credentials(
         server_url=server_url.rstrip("/"),
         access_token=data["access_token"],
         refresh_token=data["refresh_token"],
-        username=data["user"]["username"],
-        role=data["user"]["role"],
+        username=user_data["username"],
+        role=user_data["role"],
         expires_at=_exp_from_jwt(data["access_token"]),
+        mandant_id=user_data.get("mandant_id"),
+        holding_role=user_data.get("holding_role"),
     )
     save(creds)
     return creds
@@ -124,6 +135,10 @@ def do_refresh(creds: Credentials) -> Credentials | None:
         )
         resp.raise_for_status()
         data = resp.json()
+        # POST /auth/refresh returns only new tokens, no `user` payload —
+        # carry the previously-stored mandant_id/holding_role over as-is
+        # (same as username/role, which this already did before these
+        # fields existed).
         updated = Credentials(
             server_url=creds.server_url,
             access_token=data["access_token"],
@@ -131,6 +146,8 @@ def do_refresh(creds: Credentials) -> Credentials | None:
             username=creds.username,
             role=creds.role,
             expires_at=_exp_from_jwt(data["access_token"]),
+            mandant_id=creds.mandant_id,
+            holding_role=creds.holding_role,
         )
         save(updated)
         return updated
@@ -166,13 +183,21 @@ def get_valid_credentials() -> Credentials | None:
     return creds
 
 
-def resolve_push_target(push_arg: str | None) -> tuple[str | None, dict[str, str]]:
+def resolve_push_target(push_arg: str | None, mandate: str | None = None) -> tuple[str | None, dict[str, str]]:
     """Resolve the push URL and auth headers for a --push argument.
 
     push_arg values:
       None / ""  →  no push
       "@"        →  use stored server URL + /api/v1/runs with Bearer token
       any URL    →  use that URL; inject Bearer token if stored creds match
+
+    *mandate*, if given, is sent as X-Mandant-Context — the server only
+    honors it for a Bearer-token push by a holding_admin/holding_viewer/
+    group_admin/group_viewer (wafpass-server's get_auth_context()/
+    require_ingest()); an ordinary mandate-scoped user or an --api-key
+    push ignores it server-side (a key's mandate is fixed when it's
+    created), so it's harmless to always attach it here rather than
+    duplicating that role check client-side.
 
     Returns (url_or_none, extra_headers).
     """
@@ -184,11 +209,16 @@ def resolve_push_target(push_arg: str | None) -> tuple[str | None, dict[str, str
     if push_arg == "@":
         if creds is None:
             return None, {}          # caller must handle the error
-        return f"{creds.server_url}/api/v1/runs", {"Authorization": creds.bearer()}
+        headers = {"Authorization": creds.bearer()}
+        if mandate:
+            headers["X-Mandant-Context"] = mandate
+        return f"{creds.server_url}/api/v1/runs", headers
 
     # Explicit URL — inject Bearer if we have creds for that server
     url = push_arg
     headers: dict[str, str] = {}
     if creds and url.startswith(creds.server_url):
         headers["Authorization"] = creds.bearer()
+    if mandate:
+        headers["X-Mandant-Context"] = mandate
     return url, headers
