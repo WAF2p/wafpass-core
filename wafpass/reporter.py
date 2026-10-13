@@ -28,6 +28,14 @@ STATUS_ICONS = {
     "ERROR":  ("!", "bold red"),
 }
 
+# Mirrors wafpass.engine.SEVERITY_ORDER — kept local to avoid a heavy import.
+_SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+_DASHBOARD_TIP = (
+    "Tip: run with --output json --push http://localhost:8000/runs "
+    "to see this result in the dashboard."
+)
+
 
 def _severity_badge(severity: str) -> Text:
     color = SEVERITY_COLORS.get(severity.lower(), "white")
@@ -37,6 +45,113 @@ def _severity_badge(severity: str) -> Text:
 def _status_text(status: str) -> Text:
     icon, color = STATUS_ICONS.get(status, ("?", "white"))
     return Text(f"{icon} {status}", style=color)
+
+
+def _compute_score(report: Report) -> int:
+    """Compute the pillar-average score used by the JSON schema and dashboard.
+
+    Mirrors the calculation in wafpass.runner.run_scan so the console summary
+    matches what the dashboard shows.
+    """
+    pillar_totals: dict[str, list[int]] = {}
+    for cr in report.results:
+        pillar_totals.setdefault(cr.control.pillar, []).append(
+            1 if cr.status == "PASS" else 0
+        )
+    pillar_scores = {
+        p: int(sum(v) / len(v) * 100) if v else 0
+        for p, v in pillar_totals.items()
+    }
+    if not pillar_scores:
+        return 0
+    return int(sum(pillar_scores.values()) / len(pillar_scores))
+
+
+def _find_top_finding(report: Report) -> CheckResult | None:
+    """Return the single most important failing check result for the summary.
+
+    Priority: highest severity, then FAIL over ERROR, then first seen.
+    """
+    candidates: list[tuple[int, int, CheckResult]] = []
+    for cr in report.results:
+        for r in cr.results:
+            if r.status not in ("FAIL", "ERROR"):
+                continue
+            sev_rank = _SEVERITY_ORDER.get(r.severity.lower(), 0)
+            # FAIL is slightly more actionable than ERROR for the spotlight.
+            status_rank = 1 if r.status == "FAIL" else 0
+            candidates.append((sev_rank, status_rank, r))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _format_remediation_one_liner(remediation: str | None, max_len: int = 90) -> str:
+    if not remediation:
+        return ""
+    cleaned = remediation.strip().replace("\n", " ")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 3] + "..."
+    return cleaned
+
+
+def _print_welcome_summary(report: Report, score: int | None) -> None:
+    """Print a friendly, high-level result panel above the per-control details."""
+    score_value = score if score is not None else _compute_score(report)
+
+    header = (
+        f"[bold cyan]WAF++ PASS[/bold cyan]  [dim]v{__version__}[/dim]"
+    )
+    sub = (
+        f"[dim]Checking:[/dim] [white]{report.path}[/white]   "
+        f"[dim]Controls loaded:[/dim] [white]{report.controls_loaded}[/white]"
+    )
+    totals = (
+        f"[green]✓ PASS: {report.total_pass}[/green]   "
+        f"[red]✗ FAIL: {report.total_fail}[/red]   "
+        f"[yellow]─ SKIP: {report.total_skip}[/yellow]"
+    )
+    if report.total_waived:
+        totals += f"   [blue]○ WAIVED: {report.total_waived}[/blue]"
+
+    console.print(Panel(
+        f"{header}\n{sub}\n\n  {totals}\n  Score: {score_value}/100",
+        border_style="cyan",
+        padding=(0, 2),
+    ))
+    console.print()
+
+
+def _print_top_finding(report: Report) -> None:
+    """Highlight the single most important failing finding, if any."""
+    finding = _find_top_finding(report)
+    if finding is None:
+        return
+
+    sev_color = SEVERITY_COLORS.get(finding.severity.lower(), "white")
+    remediation = _format_remediation_one_liner(finding.remediation)
+
+    lines = [
+        f"  [bold {sev_color}]{finding.severity.upper()}:[/bold {sev_color}] "
+        f"[white]{finding.message}[/white]",
+        f"  [dim]Resource:[/dim] [white]{finding.resource}[/white]",
+    ]
+    if remediation:
+        lines.append(f"  [dim]Quick fix:[/dim] [white]{remediation}[/white]")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold white]Top finding[/bold white]",
+        border_style=sev_color,
+        padding=(0, 2),
+    ))
+    console.print()
+
+
+def _print_footer_tip() -> None:
+    console.print(f"  [dim]{_DASHBOARD_TIP}[/dim]")
+    console.print()
 
 
 def _format_result_line(result: CheckResult, verbose: bool) -> list[tuple[Text, str, str]] | None:
@@ -52,16 +167,18 @@ def _format_result_line(result: CheckResult, verbose: bool) -> list[tuple[Text, 
     return status_t, resource_t, message_t
 
 
-def print_report(report: Report, verbose: bool = False, diff: dict | None = None) -> None:
+def print_report(
+    report: Report,
+    verbose: bool = False,
+    diff: dict | None = None,
+    score: int | None = None,
+) -> None:
     """Print the full WAF++ PASS report to the console."""
-    # Header panel
-    header_lines = [
-        f"[bold cyan]WAF++ PASS[/bold cyan]  [dim]v{__version__}[/dim]",
-        f"[dim]Checking:[/dim] [white]{report.path}[/white]   "
-        f"[dim]Controls loaded:[/dim] [white]{report.controls_loaded}[/white]",
-    ]
-    console.print(Panel("\n".join(header_lines), border_style="cyan", padding=(0, 2)))
-    console.print()
+    # Friendly high-level summary panel
+    _print_welcome_summary(report, score)
+
+    # Spotlight the single most important failing finding
+    _print_top_finding(report)
 
     # Per-control sections
     for cr in report.results:
@@ -73,6 +190,9 @@ def print_report(report: Report, verbose: bool = False, diff: dict | None = None
     # Change tracking (shown after summary when a previous run exists)
     if diff is not None:
         _print_diff(diff)
+
+    # Footer tip
+    _print_footer_tip()
 
 
 def _print_control_section(cr: ControlResult, verbose: bool) -> None:
@@ -294,6 +414,8 @@ def _print_diff(diff: dict) -> None:
     console.print(Rule(style="dim"))
 
 
-def print_summary_only(report: Report) -> None:
+def print_summary_only(report: Report, score: int | None = None) -> None:
     """Print only the summary table (no per-control details)."""
+    _print_welcome_summary(report, score)
     _print_summary(report)
+    _print_footer_tip()

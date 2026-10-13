@@ -67,6 +67,47 @@ jobs:
       - name: Build
         run: python -m build
 
+      # ── Generate SBOMs (CNCF requirement) ─────────────────────────────────────
+      # Build a clean runtime environment so the SBOM reflects the distributed
+      # artifact and its actual transitive dependency tree.
+      - name: Create runtime venv and install package
+        run: |
+          python -m venv .sbom-venv
+          .sbom-venv/bin/pip install dist/*.whl
+
+      - name: Install SBOM tooling
+        run: |
+          python -m venv .tools-venv
+          .tools-venv/bin/pip install cyclonedx-bom
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          .tools-venv/bin/cyclonedx-py environment .sbom-venv/bin/python \
+            --pyproject pyproject.toml \
+            -o sbom.cyclonedx.json --of JSON
+
+      - name: Install Syft
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SPDX SBOM
+        run: |
+          .sbom-venv/bin/pip freeze > requirements.sbom.txt
+          syft file:requirements.sbom.txt -o spdx-json=sbom.spdx.json
+
+      - name: Generate license report
+        run: |
+          .sbom-venv/bin/pip install pip-licenses
+          .sbom-venv/bin/pip-licenses --format=json --output-file=licenses.json
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pass-sbom
+          path: |
+            sbom.cyclonedx.json
+            sbom.spdx.json
+            licenses.json
+
       # ── Run tests ─────────────────────────────────────────────────────────────
       - name: Install package + test deps
         run: pip install ".[dev]"
@@ -78,6 +119,17 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+      # ── Attest build provenance (CNCF / GitHub) ───────────────────────────────
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+            sbom.cyclonedx.json
+            sbom.spdx.json
+            licenses.json
+
       # ── Tag & publish GitHub release ──────────────────────────────────────────
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -88,3 +140,6 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+            sbom.cyclonedx.json
+            sbom.spdx.json
+            licenses.json

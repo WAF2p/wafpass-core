@@ -253,7 +253,7 @@ def _load_controls_from_server(
     zip_downloaded = False
     try:
         # Fetch controls ZIP from server export endpoint
-        url = f"{server_url.rstrip('/')}/controls/export"
+        url = f"{server_url.rstrip('/')}/api/v1/controls/export"
         params: dict[str, str] = {}
         if pillar:
             params["pillar"] = pillar
@@ -294,8 +294,8 @@ def _load_controls_from_server(
 
     except httpx.HTTPError as exc:
         if exc.response is not None and exc.response.status_code == 404:
-            logger.warning("No controls found in database, fetching via /controls endpoint")
-            # Fall through to fetch from /controls endpoint
+            logger.warning("No controls found in database, fetching via /api/v1/controls endpoint")
+            # Fall through to fetch from /api/v1/controls endpoint
         elif exc.response is not None and exc.response.status_code == 401:
             logger.error(
                 "Authentication required. Run 'wafpass login %s' to authenticate.",
@@ -315,10 +315,10 @@ def _load_controls_from_server(
         logger.error("Error loading controls from server: %s", exc)
         return []
 
-    # If /export didn't work, try fetching from /controls endpoint
+    # If /export didn't work, try fetching from /api/v1/controls endpoint
     if not zip_downloaded:
         try:
-            url = f"{server_url.rstrip('/')}/controls"
+            url = f"{server_url.rstrip('/')}/api/v1/controls"
             params: dict[str, str] = {}
             if pillar:
                 params["pillar"] = pillar

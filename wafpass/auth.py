@@ -89,8 +89,8 @@ def _exp_from_jwt(token: str) -> str:
 # ── Network helpers ───────────────────────────────────────────────────────────
 
 def do_login(server_url: str, username: str, password: str) -> Credentials:
-    """POST /auth/login and return stored credentials. Raises httpx errors on failure."""
-    url = f"{server_url.rstrip('/')}/auth/login"
+    """POST /api/v1/auth/login and return stored credentials. Raises httpx errors on failure."""
+    url = f"{server_url.rstrip('/')}/api/v1/auth/login"
     resp = httpx.post(
         url,
         json={"username": username, "password": password},
@@ -115,7 +115,7 @@ def do_login(server_url: str, username: str, password: str) -> Credentials:
 def do_refresh(creds: Credentials) -> Credentials | None:
     """Exchange refresh token for a new access token. Returns updated Credentials or None."""
     try:
-        url = f"{creds.server_url.rstrip('/')}/auth/refresh"
+        url = f"{creds.server_url.rstrip('/')}/api/v1/auth/refresh"
         resp = httpx.post(
             url,
             json={"refresh_token": creds.refresh_token},
@@ -139,10 +139,10 @@ def do_refresh(creds: Credentials) -> Credentials | None:
 
 
 def do_logout(creds: Credentials) -> None:
-    """POST /auth/logout to revoke the refresh token on the server."""
+    """POST /api/v1/auth/logout to revoke the refresh token on the server."""
     try:
         httpx.post(
-            f"{creds.server_url.rstrip('/')}/auth/logout",
+            f"{creds.server_url.rstrip('/')}/api/v1/auth/logout",
             json={"refresh_token": creds.refresh_token},
             headers={"Content-Type": "application/json"},
             timeout=10,
@@ -171,7 +171,7 @@ def resolve_push_target(push_arg: str | None) -> tuple[str | None, dict[str, str
 
     push_arg values:
       None / ""  →  no push
-      "@"        →  use stored server URL + /runs with Bearer token
+      "@"        →  use stored server URL + /api/v1/runs with Bearer token
       any URL    →  use that URL; inject Bearer token if stored creds match
 
     Returns (url_or_none, extra_headers).
@@ -184,7 +184,7 @@ def resolve_push_target(push_arg: str | None) -> tuple[str | None, dict[str, str
     if push_arg == "@":
         if creds is None:
             return None, {}          # caller must handle the error
-        return f"{creds.server_url}/runs", {"Authorization": creds.bearer()}
+        return f"{creds.server_url}/api/v1/runs", {"Authorization": creds.bearer()}
 
     # Explicit URL — inject Bearer if we have creds for that server
     url = push_arg

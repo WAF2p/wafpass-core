@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "project": "wafpp-validation-demo",
+  "branch": "main",
+  "git_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+  "triggered_by": "local",
+  "run": {},
+  "iac_framework": "terraform",
+  "stage": "prod",
+  "score": 87,
+  "pillar_scores": {},
+  "path": "",
+  "controls_loaded": 0,
+  "controls_run": 0,
+  "detected_regions": [],
+  "source_paths": [],
+  "controls_meta": [],
+  "findings": [],
+  "secret_findings": [],
+  "plan_changes": null,
+  "source_snapshot": {},
+  "attestation": null
+}

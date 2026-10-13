@@ -2,6 +2,8 @@
 
 This document covers internal architecture, design decisions, technical debt, and contribution guidance for `wafpass-core` (`pass/`). For user-facing documentation see `README.md`.
 
+> **BREAKING CHANGE:** `wafpass-server` endpoints are now under `/api/v1`. The CLI, wizard, and loader have been updated to call `/api/v1/auth/login`, `/api/v1/runs`, `/api/v1/controls`, `/api/v1/evidence`, etc.
+
 ---
 
 ## Directory structure
@@ -164,7 +166,7 @@ The password is **never** written to disk.
 
 ```
 wafpass login <server_url>
-    │  POST /auth/login {username, password}
+    │  POST /api/v1/auth/login {username, password}
     ▼
 do_login() → Credentials stored in ~/.wafpass/credentials.json
     │  access_token, refresh_token, role, expires_at
@@ -190,7 +192,7 @@ Treats the token as expired 30 seconds before the actual `exp` timestamp to avoi
 | `push_arg` | Behaviour |
 |------------|-----------|
 | `None` / `""` | No push |
-| `"@"` | Uses `{server_url}/runs` from stored credentials with Bearer token |
+| `"@"` | Uses `{server_url}/api/v1/runs` from stored credentials with Bearer token |
 | Any URL | Uses that URL; injects Bearer token if the URL prefix matches `server_url` |
 
 ### Evidence CLI subcommands
@@ -199,9 +201,9 @@ Treats the token as expired 30 seconds before the actual `exp` timestamp to avoi
 
 | Subcommand | Server call | Description |
 |------------|-------------|-------------|
-| `evidence lock` | `POST /evidence` | Freeze a run snapshot; print hash, public URL, QR link |
-| `evidence list` | `GET /evidence` | List locked packages (with optional `--project` filter) |
-| `evidence show` | `GET /evidence/{id}` | Print metadata; `--hash` prints only the SHA-256 digest |
+| `evidence lock` | `POST /api/v1/evidence` | Freeze a run snapshot; print hash, public URL, QR link |
+| `evidence list` | `GET /api/v1/evidence` | List locked packages (with optional `--project` filter) |
+| `evidence show` | `GET /api/v1/evidence/{id}` | Print metadata; `--hash` prints only the SHA-256 digest |
 
 All three subcommands require an active `wafpass login` session.
 
@@ -375,7 +377,7 @@ export $(grep -v '^#' .env | xargs)
 
 | Variable | Description |
 |----------|-------------|
-| `WAFPASS_SERVER_URL` | Auto-POST results to wafpass-server after every `wafpass check` run. Equivalent to `--push <url>`. Must include the `/runs` path: `http://localhost:8000/runs`. |
+| `WAFPASS_SERVER_URL` | Auto-POST results to wafpass-server after every `wafpass check` run. Equivalent to `--push <url>`. Must include the `/api/v1/runs` path: `http://localhost:8000/api/v1/runs`. |
 | `${*}` in `.wafpass-export.yml` | Any `${VAR}` placeholder in export config is expanded from the environment at load time. See `.env.example` for common export plugin secrets. |
 | `EDITOR` | Editor launched by `wafpass wizard` for interactive control authoring. Falls back to `vi` if unset. |
 

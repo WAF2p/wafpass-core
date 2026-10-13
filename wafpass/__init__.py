@@ -31,7 +31,13 @@ except PackageNotFoundError:
 __name_full__ = "WAF++ PASS"
 
 # ── Result schema (public contract) ───────────────────────────────────────────
-from wafpass.schema import FindingSchema, WafpassResultSchema  # noqa: E402
+from wafpass.schema import (  # noqa: E402
+    FindingSchema,
+    LocalAttestationSchema,
+    ServerValidationSchema,
+    ValidationEnvelopeSchema,
+    WafpassResultSchema,
+)
 
 # ── Internal report model (used by CLI, PDF reporter, etc.) ───────────────────
 from wafpass.models import Report  # noqa: E402
@@ -75,6 +81,9 @@ __all__ = [
     "run_scan",
     "WafpassResultSchema",
     "FindingSchema",
+    "LocalAttestationSchema",
+    "ServerValidationSchema",
+    "ValidationEnvelopeSchema",
     "Report",
     "IaCPlugin",
     "IaCBlock",

@@ -4,7 +4,7 @@ This module defines the canonical JSON shape of a wafpass-result.json file.
 It is the single source of truth used by:
 
   * ``wafpass check --output json``  (produces the payload)
-  * ``wafpass-server POST /runs``     (validates the payload on ingest)
+  * ``wafpass-server POST /api/v1/runs``     (validates the payload on ingest)
   * Dashboard / CI consumers         (parse the payload)
 
 Consumers should import from here rather than duplicating these types.
@@ -113,11 +113,74 @@ class ControlMetaSchema(BaseModel):
     checks: list[ControlCheckMetaSchema] = Field(default_factory=list)
 
 
+class LocalAttestationSchema(BaseModel):
+    """Organization-level cryptographic attestation of a single run.
+
+    This proves that a specific entity (organization, CI runner, auditor) signed
+    the exact run result. It is produced locally and then submitted to the
+    WAF++ central server for countersignature.
+    """
+
+    public_key: str = Field(
+        description="PEM-encoded Ed25519 public key (or base64-encoded raw key).",
+    )
+    signature: str = Field(
+        description="Base64-encoded Ed25519 signature over the canonical run hash.",
+    )
+    algorithm: str = Field(default="ed25519", description="Signature algorithm.")
+    canonical_hash: str = Field(
+        description="SHA-256 hex digest of the canonical JSON serialization of the run.",
+    )
+    signed_at: str = Field(description="ISO-8601 UTC timestamp of the local signature.")
+    signer_kind: str = Field(
+        default="organization",
+        description="Kind of signer: organization | ci-runner | auditor | offline-fallback.",
+    )
+
+
+class ServerValidationSchema(BaseModel):
+    """Official WAF++ server countersignature and validation record.
+
+    This is produced by the central WAF++ server after verifying the local
+    attestation and the canonical run hash. It forms a certificate chain back
+    to the published WAF++ root certificate.
+    """
+
+    validation_id: str = Field(description="UUID assigned by the WAF++ server.")
+    validated_at: str = Field(description="ISO-8601 UTC timestamp of server validation.")
+    server_public_key: str = Field(
+        description="PEM-encoded public key of the server intermediate certificate.",
+    )
+    server_signature: str = Field(
+        description="Base64-encoded Ed25519 signature over canonical_hash + validation_id + validated_at.",
+    )
+    certificate_chain: list[str] = Field(
+        default_factory=list,
+        description="PEM-encoded X.509 certificate chain: [server intermediate, WAF++ root].",
+    )
+    badge_url: str = Field(
+        default="",
+        description="Public URL to the badge image/JSON for this validation.",
+    )
+    verification_url: str = Field(
+        default="",
+        description="Public URL to verify this validation without authentication.",
+    )
+    expires_at: Optional[str] = Field(
+        default=None,
+        description="Optional ISO-8601 UTC expiry of the validation.",
+    )
+    metadata: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional provenance metadata supplied by the validating dashboard/server.",
+    )
+
+
 class WafpassResultSchema(BaseModel):
     """Top-level wafpass-result.json payload.
 
     Produced by ``wafpass check --output json`` and consumed by
-    ``wafpass-server POST /runs``.
+    ``wafpass-server POST /api/v1/runs``.
     """
 
     schema_version: str = Field(default="1.0", description="Schema version for forward-compatibility checks.")
@@ -202,4 +265,51 @@ class WafpassResultSchema(BaseModel):
             "When uploaded, wafpass-server can render Local preview diffs in the "
             "dashboard without needing filesystem access to the original repository."
         ),
+    )
+
+    completed_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC timestamp when the scan finished. Used by the dashboard for duration metrics.",
+    )
+
+    # ── Local attestation (optional, populated via --validate) ────────────────────
+    attestation: Optional[LocalAttestationSchema] = Field(
+        default=None,
+        description=(
+            "Optional local cryptographic attestation of this run. "
+            "Contains the canonical run hash and an Ed25519 signature from the "
+            "organization's signing key."
+        ),
+    )
+
+
+class ValidationEnvelopeSchema(BaseModel):
+    """Complete validation artifact delivered to the user.
+
+    Combines the run result, the local attestation, and (when available) the
+    official server countersignature. This is the unit that is written to disk,
+    verified, and embedded in badges/certificates.
+    """
+
+    schema_version: str = Field(default="1.0", description="Validation envelope schema version.")
+    run_hash: str = Field(description="Canonical SHA-256 hash of the run result.")
+    status: str = Field(
+        description="Validation status: official | offline | pending.",
+    )
+    result: Optional[WafpassResultSchema] = Field(
+        default=None,
+        description="The original run result. May be omitted in lightweight envelopes.",
+    )
+    local_attestation: LocalAttestationSchema
+    server_validation: Optional[ServerValidationSchema] = Field(
+        default=None,
+        description="Official server countersignature; null for offline validations.",
+    )
+    pending_upgrade: bool = Field(
+        default=False,
+        description="True when an offline validation can be upgraded to official later.",
+    )
+    metadata: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional provenance metadata supplied by the validating dashboard/server.",
     )

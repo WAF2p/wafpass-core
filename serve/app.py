@@ -29,6 +29,8 @@ from pydantic import BaseModel
 # Allow importing wafpass from the parent directory when run without install
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from wafpass.validation_server import router as validation_router  # noqa: E402
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 CONTROLS_DIR = BASE_DIR.parent / "controls"
@@ -48,6 +50,7 @@ app = FastAPI(
     redoc_url=None,
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+app.include_router(validation_router)
 
 _TEMPLATE_TEXT: str | None = None
 

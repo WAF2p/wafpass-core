@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +40,7 @@ from reportlab.platypus.tableofcontents import TableOfContents
 
 from wafpass import __version__
 from wafpass.models import ControlResult, Report
+from wafpass.schema import ValidationEnvelopeSchema
 
 # ── Logo path (resolved relative to this file so it works from any cwd) ───────
 _LOGO_PATH = str(
@@ -51,7 +54,11 @@ except Exception:
     _LOGO_IMG = None  # graceful fallback if image not found
 
 # ── Regulatory logos directory ────────────────────────────────────────────────
-_REG_LOGOS_DIR = Path(__file__).parent.parent / "assets" / "regulatory"
+# Allow operators (e.g. the Docker image) to mount or copy logos under a
+# well-known path, while keeping the source-tree default for local runs.
+_REG_LOGOS_DIR = Path(
+    os.environ.get("WAFPASS_ASSETS_DIR", Path(__file__).parent.parent / "assets")
+) / "regulatory"
 
 # Cache of loaded regulatory logo ImageReaders (None means image not found)
 _REG_LOGO_CACHE: dict[str, "ImageReader | None"] = {}
@@ -1862,6 +1869,7 @@ def _build_framework_map(report: Report) -> dict[str, dict]:
 _PRIORITY_FRAMEWORKS: list[str] = [
     "GDPR",
     "BSI C5:2020",
+    "BSI C3A:2026",
     "ISO 27001:2022",
     "EUCS (ENISA)",
     "SOC 2",
@@ -4111,6 +4119,250 @@ def _risk_acceptance_section(report: Report, S: dict, generated_at: str) -> list
     ))
 
     return elems
+
+
+# ── Validation certificate ────────────────────────────────────────────────────
+
+def generate_validation_certificate(
+    envelope: ValidationEnvelopeSchema,
+    output_path: Path,
+) -> None:
+    """Render a one-page PDF certificate for a WAF++ validation envelope.
+
+    The certificate is a standalone, printable proof of validation. It includes
+    the run metadata, the cryptographic validation ID, the certificate chain
+    fingerprints, and instructions for independent verification.
+    """
+    from cryptography import x509
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    result_dict = envelope.result.model_dump() if envelope.result else {}
+    sv = envelope.server_validation
+    status = envelope.status
+    is_official = status == "official"
+
+    status_fg = C_GREEN if is_official else C_YELLOW
+    status_bg = C_GREEN_LT if is_official else C_YELLOW_LT
+    status_label = "OFFICIALLY VALIDATED" if is_official else "OFFLINE VALIDATION"
+
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    c = pdfcanvas.Canvas(str(output_path), pagesize=A4)
+
+    # ── Full-page subtle background ─────────────────────────────────────────────
+    c.setFillColor(colors.HexColor("#f8fafc"))
+    c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+
+    # ── Top navy band with wordmark ────────────────────────────────────────────
+    c.setFillColor(C_NAVY)
+    c.rect(0, PAGE_H - 4.2 * cm, PAGE_W, 4.2 * cm, fill=1, stroke=0)
+    _draw_logo(c, MARGIN, PAGE_H - 3.2 * cm, size=36)
+    c.setFillColor(C_WHITE)
+    c.setFont("Helvetica-Bold", 22)
+    c.drawString(MARGIN + 44, PAGE_H - 2.15 * cm, "WAF")
+    w_waf = c.stringWidth("WAF", "Helvetica-Bold", 22)
+    c.setFillColor(C_BLUE)
+    c.drawString(MARGIN + 44 + w_waf, PAGE_H - 2.15 * cm, "++")
+    c.setFillColor(colors.HexColor("#94a3b8"))
+    c.setFont("Helvetica", 11)
+    c.drawString(MARGIN + 44, PAGE_H - 2.75 * cm, "Official Validation Certificate")
+
+    # ── Blue accent line ────────────────────────────────────────────────────────
+    c.setStrokeColor(C_BLUE)
+    c.setLineWidth(3)
+    c.line(MARGIN, PAGE_H - 4.35 * cm, PAGE_W - MARGIN, PAGE_H - 4.35 * cm)
+
+    # ── Status badge ────────────────────────────────────────────────────────────
+    badge_w = 6.2 * cm
+    badge_h = 1.4 * cm
+    badge_x = (PAGE_W - badge_w) / 2
+    badge_y = PAGE_H - 6.2 * cm
+    c.setFillColor(status_bg)
+    c.setStrokeColor(status_fg)
+    c.setLineWidth(1.5)
+    c.roundRect(badge_x, badge_y, badge_w, badge_h, 8, fill=1, stroke=1)
+    c.setFillColor(status_fg)
+    c.setFont("Helvetica-Bold", 14)
+    label_w = c.stringWidth(status_label, "Helvetica-Bold", 14)
+    c.drawString((PAGE_W - label_w) / 2, badge_y + 0.5 * cm, status_label)
+
+    # ── Intro text ──────────────────────────────────────────────────────────────
+    y = PAGE_H - 8.0 * cm
+    c.setFillColor(C_DARK)
+    c.setFont("Helvetica", 10)
+    intro = (
+        "This certificate attests that the WAF++ PASS run identified below was "
+        "cryptographically signed by the organization and, for official validations, "
+        "counter-signed by the WAF++ central validation authority. "
+        "The certificate can be re-verified at any time using the public verification URL or the "
+        "wafpass verify command."
+    )
+    text_obj = c.beginText(MARGIN, y)
+    text_obj.setFont("Helvetica", 10)
+    text_obj.setFillColor(C_DARK)
+    for line in _wrap_text(intro, CONTENT_W, "Helvetica", 10, c):
+        text_obj.textLine(line)
+    c.drawText(text_obj)
+
+    # ── Certificate metadata table ──────────────────────────────────────────────
+    y = text_obj.getY() - 1.0 * cm
+    metadata = [
+        ["Validation ID", sv.validation_id if sv else "— (offline)"],
+        ["Run hash", envelope.run_hash],
+        ["Project", result_dict.get("project") or "—"],
+        ["Branch", result_dict.get("branch") or "—"],
+        ["Git SHA", result_dict.get("git_sha") or "—"],
+        ["Score", f"{result_dict.get('score', '—')}%"],
+        ["Status", status.upper()],
+        ["Signed by", envelope.local_attestation.signer_kind],
+        ["Signed at", envelope.local_attestation.signed_at],
+        ["Validated at", sv.validated_at if sv else "—"],
+    ]
+    if sv and sv.expires_at:
+        metadata.append(["Expires at", sv.expires_at])
+    if sv and sv.verification_url:
+        metadata.append(["Verification URL", sv.verification_url])
+    if envelope.metadata:
+        if envelope.metadata.get("organization"):
+            metadata.append(["Organization", envelope.metadata["organization"]])
+        if envelope.metadata.get("environment"):
+            metadata.append(["Environment", envelope.metadata["environment"]])
+        if envelope.metadata.get("validated_by"):
+            metadata.append(["Validated by", envelope.metadata["validated_by"]])
+        if envelope.metadata.get("notes"):
+            metadata.append(["Notes", envelope.metadata["notes"]])
+
+    S = _styles()
+    rows = [
+        [Paragraph(f'<font name="Helvetica-Bold" color="#{_hex(C_NAVY)}">{k}</font>', S["body"]),
+         Paragraph(str(v), S["body"])]
+        for k, v in metadata
+    ]
+    table = Table(rows, colWidths=[4.2 * cm, CONTENT_W - 4.2 * cm])
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("LEADING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, C_BORDER),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [C_WHITE, C_GREY_LT]),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    table.wrapOn(c, CONTENT_W, PAGE_H)
+    table.drawOn(c, MARGIN, y - table._height)
+
+    y = y - table._height - 1.0 * cm
+
+    # ── Certificate chain section ─────────────────────────────────────────────
+    if sv and sv.certificate_chain:
+        c.setFillColor(C_NAVY)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(MARGIN, y, "Certificate Chain")
+        y -= 0.6 * cm
+
+        chain_rows = []
+        for idx, cert_pem in enumerate(sv.certificate_chain):
+            try:
+                cert = x509.load_pem_x509_certificate(cert_pem.encode("ascii"))
+                fingerprint = cert.fingerprint(hashlib.sha256()).hex()
+                subject = cert.subject.rfc4514_string()
+            except Exception:
+                subject = "(could not parse certificate)"
+                fingerprint = "—"
+            position = "Server Intermediate" if idx == 0 else "WAF++ Root CA"
+            chain_rows.append([
+                Paragraph(f'<font name="Helvetica-Bold" color="#{_hex(C_NAVY)}">{position}</font>', S["body_sm"]),
+                Paragraph(f'<font size="8" name="Courier">{fingerprint}</font>', S["body_sm"]),
+                Paragraph(subject, S["body_sm"]),
+            ])
+
+        chain_table = Table(chain_rows, colWidths=[3.2 * cm, 7.8 * cm, CONTENT_W - 11.0 * cm])
+        chain_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("LEADING", (0, 0), (-1, -1), 11),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("GRID", (0, 0), (-1, -1), 0.4, C_BORDER),
+            ("ROWBACKGROUNDS", (0, 0), (-1, -1), [C_WHITE, C_GREY_LT]),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        chain_table.wrapOn(c, CONTENT_W, PAGE_H)
+        chain_table.drawOn(c, MARGIN, y - chain_table._height)
+        y = y - chain_table._height - 1.0 * cm
+
+    # ── Verification instructions ───────────────────────────────────────────────
+    c.setFillColor(C_NAVY)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(MARGIN, y, "Independent Verification")
+    y -= 0.6 * cm
+
+    verify_text = (
+        "Anyone can verify this validation by running:\n\n"
+        "  wafpass verify <envelope.json>\n\n"
+        "For official validations, the server status can also be checked online at the "
+        "Verification URL shown above. The local attestation proves the run result has not "
+        "been altered since it was signed; the server countersignature proves the WAF++ "
+        "authority reviewed and recorded the validation."
+    )
+    if not is_official:
+        verify_text = (
+            "This is an offline, self-signed validation. It proves the run result was signed by "
+            "the organization's private key, but it has not yet been countersigned by WAF++. "
+            "Run 'wafpass validate upgrade --envelope <file>' once internet access is available "
+            "to convert it to an official certificate."
+        )
+
+    text_obj = c.beginText(MARGIN, y)
+    text_obj.setFont("Helvetica", 9)
+    text_obj.setFillColor(C_DARK)
+    for line in verify_text.splitlines():
+        if line.startswith("  wafpass"):
+            text_obj.setFont("Courier", 9)
+            text_obj.textLine(line)
+            text_obj.setFont("Helvetica", 9)
+        else:
+            for wrapped in _wrap_text(line, CONTENT_W, "Helvetica", 9, c):
+                text_obj.textLine(wrapped)
+    c.drawText(text_obj)
+
+    # ── Bottom footer ───────────────────────────────────────────────────────────
+    footer_y = MARGIN - 0.6 * cm
+    c.setStrokeColor(C_BORDER)
+    c.setLineWidth(0.5)
+    c.line(MARGIN, footer_y + 0.8 * cm, PAGE_W - MARGIN, footer_y + 0.8 * cm)
+    c.setFillColor(C_GREY)
+    c.setFont("Helvetica", 8)
+    c.drawString(MARGIN, footer_y, f"Generated {generated_at} · WAF++ PASS v{__version__}")
+    c.drawRightString(PAGE_W - MARGIN, footer_y, "waf2p.dev")
+
+    c.showPage()
+    c.save()
+
+
+def _wrap_text(text: str, max_width: float, font_name: str, font_size: float, canvas: pdfcanvas.Canvas) -> list[str]:
+    """Wrap *text* into lines that fit within *max_width* points."""
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        test = f"{current} {word}"
+        if canvas.stringWidth(test, font_name, font_size) <= max_width:
+            current = test
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────

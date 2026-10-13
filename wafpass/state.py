@@ -174,6 +174,15 @@ def save_run(snapshot: dict, state_dir: Path) -> Path:
 
     run_id = snapshot["run_id"]
     run_file = runs_dir / f"run-{run_id}.json"
+
+    # Refuse to overwrite a validated/locked run snapshot.
+    locked_file = runs_dir / f"run-{run_id}-validated.json"
+    if locked_file.exists():
+        raise RuntimeError(
+            f"Run {run_id} has been validated and is locked. "
+            "Delete the validation envelope before overwriting."
+        )
+
     run_file.write_text(json.dumps(snapshot, indent=2, default=str), encoding="utf-8")
 
     # Update (or create) index
@@ -195,6 +204,9 @@ def save_run(snapshot: dict, state_dir: Path) -> Path:
         "score": snapshot["score"],
         "totals": snapshot["totals"],
         "file": run_file.name,
+        "validated": False,
+        "validation_id": None,
+        "validation_envelope": None,
     })
 
     index_file.write_text(json.dumps(index, indent=2, default=str), encoding="utf-8")
@@ -228,10 +240,72 @@ def load_latest_run(state_dir: Path) -> dict | None:
 
 def load_run(run_id: str, state_dir: Path) -> dict | None:
     """Load a specific run by run_id from the state directory, or None."""
-    run_file = state_dir / "runs" / f"run-{run_id}.json"
+    # Prefer the locked validated snapshot if it exists.
+    run_file = state_dir / "runs" / f"run-{run_id}-validated.json"
+    if not run_file.exists():
+        run_file = state_dir / "runs" / f"run-{run_id}.json"
     if not run_file.exists():
         return None
     try:
         return json.loads(run_file.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def is_locked(run_id: str, state_dir: Path) -> bool:
+    """Return True if the run has been validated and locked locally."""
+    return (state_dir / "runs" / f"run-{run_id}-validated.json").exists()
+
+
+def lock_run(
+    run_id: str,
+    state_dir: Path,
+    validation_id: str,
+    validation_envelope: Path | None = None,
+) -> Path:
+    """Lock a run snapshot after official validation.
+
+    The run file is renamed to run-<run_id>-validated.json and made
+    read-only. The index entry is updated to record the validation.
+    """
+    runs_dir = state_dir / "runs"
+    original = runs_dir / f"run-{run_id}.json"
+    locked = runs_dir / f"run-{run_id}-validated.json"
+
+    if not original.exists():
+        raise FileNotFoundError(f"Run file not found: {original}")
+
+    # Move the snapshot to its immutable name.
+    if locked.exists():
+        raise RuntimeError(f"Run {run_id} is already locked.")
+    original.rename(locked)
+
+    # Make it read-only (best-effort on all platforms).
+    import os
+
+    try:
+        os.chmod(locked, 0o444)
+    except (OSError, NotImplementedError):
+        pass
+
+    # Update the index entry.
+    index_file = state_dir / "index.json"
+    if index_file.exists():
+        try:
+            index = json.loads(index_file.read_text(encoding="utf-8"))
+        except Exception:
+            index = {"schema_version": STATE_SCHEMA_VERSION, "runs": []}
+    else:
+        index = {"schema_version": STATE_SCHEMA_VERSION, "runs": []}
+
+    for entry in index.get("runs", []):
+        if entry.get("run_id") == run_id:
+            entry["validated"] = True
+            entry["validation_id"] = validation_id
+            entry["file"] = locked.name
+            if validation_envelope is not None:
+                entry["validation_envelope"] = str(validation_envelope)
+            break
+
+    index_file.write_text(json.dumps(index, indent=2, default=str), encoding="utf-8")
+    return locked

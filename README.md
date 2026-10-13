@@ -12,6 +12,8 @@ It checks IaC (Infrastructure-as-Code) files against YAML control definitions an
 
 Supported IaC frameworks are loaded as **plugins** — Terraform, AWS CDK (TypeScript), and Pulumi (Python) are fully implemented; Bicep is available as a stub ready for contribution.
 
+> **BREAKING CHANGE:** The server API is now versioned under `/api/v1`. CLI commands that push to or read from `wafpass-server` have been updated to use `/api/v1/runs`, `/api/v1/controls`, `/api/v1/evidence`, etc. Update `WAFPASS_SERVER_URL` and any `--push` URLs accordingly.
+
 ## Installation
 
 ### Option A — GitHub release artifact (recommended for users)
@@ -134,9 +136,9 @@ print(result.score)                        # overall compliance score (0–100)
 print(result.pillar_scores)                # {"SEC": 90, "OPS": 75, ...}
 print(result.model_dump_json(indent=2))    # wafpass-result.json payload
 
-# Post to wafpass-server (or set WAFPASS_SERVER_URL=http://localhost:8000/runs to push automatically)
+# Post to wafpass-server (or set WAFPASS_SERVER_URL=http://localhost:8000/api/v1/runs to push automatically)
 import httpx
-httpx.post("http://localhost:8000/runs", content=result.model_dump_json(),
+httpx.post("http://localhost:8000/api/v1/runs", content=result.model_dump_json(),
            headers={"Content-Type": "application/json"})
 ```
 
@@ -197,7 +199,7 @@ result.update({
     "git_sha":      subprocess.check_output(["git","rev-parse","HEAD"]).decode().strip(),
     "triggered_by": "github-actions",
 })
-httpx.post("http://localhost:8000/runs", json=result)
+httpx.post("http://localhost:8000/api/v1/runs", json=result)
 EOF
 ```
 
@@ -253,13 +255,13 @@ Credentials file: `~/.wafpass/credentials.json`. Only JWT tokens are stored — 
 wafpass check ./infra/ --push @
 
 # Push to an explicit URL with an API key (no login required)
-wafpass check ./infra/ --output json --push http://localhost:8000/runs --api-key $WAFPASS_API_KEY
+wafpass check ./infra/ --output json --push http://localhost:8000/api/v1/runs --api-key $WAFPASS_API_KEY
 
 # Upload source snapshots so the dashboard can render Local preview diffs
 wafpass check ./infra/ --output json --push @ --upload-source
 
 # Auto-push via environment variable (equivalent to --push URL)
-WAFPASS_SERVER_URL=http://localhost:8000/runs wafpass check ./infra/
+WAFPASS_SERVER_URL=http://localhost:8000/api/v1/runs wafpass check ./infra/
 ```
 
 > **Dashboard auto-fix / Local preview:** The dashboard can show git-style diffs for auto-fix suggestions only when the run includes the original source files for the selected IaC plugin (e.g. `.tf`, `.ts`, or `.py`). Add `--upload-source` whenever you push results that will be reviewed in the dashboard's **Auto-Fix** page. Requires `--output json` and `--push`.
@@ -289,7 +291,7 @@ wafpass evidence show <evidence-id>
 wafpass evidence show <evidence-id> --hash   # print only the hash digest
 ```
 
-Each locked package gets a SHA-256 hash of its canonical snapshot and a unique public token. Auditors access the frozen HTML report at `/evidence/p/{token}` — no login required.
+Each locked package gets a SHA-256 hash of its canonical snapshot and a unique public token. Auditors access the frozen HTML report at `/api/v1/evidence/p/{token}` — no login required.
 
 ---
 
@@ -1658,7 +1660,7 @@ wafpass check ./infra/ --output json \
 import json,sys,httpx
 r=json.load(sys.stdin)
 r.update({'project':'my-infra','branch':'main'})
-httpx.post('http://localhost:8000/runs',json=r)
+httpx.post('http://localhost:8000/api/v1/runs',json=r)
 "
 ```
 
@@ -1670,7 +1672,7 @@ wafpass check ./infra/ --output json --upload-source \
 import json,sys,httpx
 r=json.load(sys.stdin)
 r.update({'project':'my-infra','branch':'main'})
-httpx.post('http://localhost:8000/runs',json=r)
+httpx.post('http://localhost:8000/api/v1/runs',json=r)
 "
 ```
 

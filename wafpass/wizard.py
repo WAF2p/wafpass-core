@@ -336,12 +336,12 @@ def export_control(
 
 
 def push_to_server(control: WizardControl, server_url: str) -> bool:
-    """POST the control payload to ``<server_url>/controls``.
+    """POST the control payload to ``<server_url>/api/v1/controls``.
 
     Returns True on success.  Warns and returns False on any error so that
     the caller can continue — files are already written by this point.
     """
-    url = server_url.rstrip("/") + "/controls"
+    url = server_url.rstrip("/") + "/api/v1/controls"
     payload = control.model_dump()
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
