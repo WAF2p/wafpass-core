@@ -113,6 +113,8 @@ def test_validate_official_fails_without_server(
     cert_path = tmp_path / "dummy-cert.pem"
     cert_path.write_text("dummy", encoding="utf-8")
     output_dir = tmp_path / "out"
+    cert_path = tmp_path / "server.pem"
+    cert_path.write_text("-----BEGIN CERTIFICATE-----\nDUMMY\n-----END CERTIFICATE-----\n")
     result = runner.invoke(
         app,
         [
