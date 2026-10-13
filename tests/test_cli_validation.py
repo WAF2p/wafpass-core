@@ -110,6 +110,8 @@ def test_validate_official_fails_without_server(
     tmp_path: Path, sample_result: Path, key_path: Path
 ):
     """`wafpass validate official` fails gracefully when no server is configured."""
+    cert_path = tmp_path / "dummy-cert.pem"
+    cert_path.write_text("dummy", encoding="utf-8")
     output_dir = tmp_path / "out"
     result = runner.invoke(
         app,
@@ -121,8 +123,10 @@ def test_validate_official_fails_without_server(
             str(key_path),
             "--output-dir",
             str(output_dir),
-            "--server-url",
+            "--validation-url",
             "http://127.0.0.1:1",  # unreachable
+            "--server-certificate",
+            str(cert_path),
         ],
     )
     assert result.exit_code != 0
@@ -153,6 +157,7 @@ def test_validate_official_with_fallback_to_offline(
         tmp_path / "out",
         api_key=None,
         server_url="http://127.0.0.1:1",
+        server_certificate="dummy",
         rc=rc,
         fallback_on_offline=True,
     )

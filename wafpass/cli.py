@@ -1354,7 +1354,7 @@ def init(
             else:
                 rc.print(
                     "[yellow]No docker-compose.yml found in the current directory.[/yellow] "
-                    "Download the WAF++ stack from https://github.com/WAF2p/pass, place it here, "
+                    "Download the WAF++ stack from https://github.com/WAF2p/wafpass-core, place it here, "
                     "then run:"
                 )
                 rc.print(f"  [bold]cd <stack-dir> && docker compose --env-file {env_path} up -d[/bold]")

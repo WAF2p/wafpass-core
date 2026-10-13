@@ -18,7 +18,7 @@ Supported IaC frameworks are loaded as **plugins** — Terraform, AWS CDK (TypeS
 
 ### Option A — GitHub release artifact (recommended for users)
 
-Download the latest `.whl` from the [GitHub Releases page](https://github.com/WAF2p/pass/releases) and install it:
+Download the latest `.whl` from the [GitHub Releases page](https://github.com/WAF2p/wafpass-core/releases) and install it:
 
 ```bash
 pip install wafpass_core-*.whl
@@ -29,7 +29,7 @@ uv pip install wafpass_core-*.whl
 ### Option B — From source
 
 ```bash
-git clone https://github.com/WAF2p/pass.git
+git clone https://github.com/WAF2p/wafpass-core.git
 cd pass
 
 # Using uv (recommended)
@@ -49,7 +49,7 @@ pip install -e ".[dev]"
 
 ```bash
 brew install git python uv
-git clone https://github.com/WAF2p/pass.git
+git clone https://github.com/WAF2p/wafpass-core.git
 cd pass
 uv pip install -e .
 
