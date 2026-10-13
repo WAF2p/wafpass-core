@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wafpass-core"
-version = "1.1.2"
+version = "1.1.4"
 description = "WAF++ PASS – IaC compliance engine, CLI, and result schema for the WAF++ framework"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,8 +44,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://waf2p.dev"
 Documentation = "https://waf2p.dev/docs/"
-Repository = "https://github.com/WAF2p/pass"
-"Bug Tracker" = "https://github.com/WAF2p/pass/issues"
+Repository = "https://github.com/WAF2p/wafpass-core"
+"Bug Tracker" = "https://github.com/WAF2p/wafpass-core/issues"
 Community = "https://github.com/WAF2p"
 
 [project.scripts]

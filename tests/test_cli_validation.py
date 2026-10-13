@@ -109,17 +109,9 @@ def test_validate_offline_envelope_is_verifiable(
 def test_validate_official_fails_without_server(
     tmp_path: Path, sample_result: Path, key_path: Path
 ):
-    """`wafpass validate official` fails gracefully when no server is configured.
-
-    `--server-url` is not a real option on this command (that name belongs
-    to `wafpass check`/`demo`'s *wafpass-server* URL, a different concept)
-    — the equivalent option here is `--validation-url`. The command also
-    now requires `--server-certificate`/`WAFPASS_SERVER_CERTIFICATE` before
-    it will even attempt the network call, which this test previously never
-    supplied; its content doesn't matter here since it's only forwarded as
-    a plain string field in the request payload, never parsed as a real
-    certificate on this path.
-    """
+    """`wafpass validate official` fails gracefully when no server is configured."""
+    cert_path = tmp_path / "dummy-cert.pem"
+    cert_path.write_text("dummy", encoding="utf-8")
     output_dir = tmp_path / "out"
     cert_path = tmp_path / "server.pem"
     cert_path.write_text("-----BEGIN CERTIFICATE-----\nDUMMY\n-----END CERTIFICATE-----\n")
@@ -167,7 +159,7 @@ def test_validate_official_with_fallback_to_offline(
         tmp_path / "out",
         api_key=None,
         server_url="http://127.0.0.1:1",
-        server_certificate=None,  # the real signature added this required param later
+        server_certificate="dummy",
         rc=rc,
         fallback_on_offline=True,
     )

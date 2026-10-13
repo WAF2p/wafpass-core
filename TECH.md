@@ -1,6 +1,6 @@
 # wafpass-core — Technical Reference
 
-This document covers internal architecture, design decisions, technical debt, and contribution guidance for `wafpass-core` (`pass/`). For user-facing documentation see `README.md`.
+This document covers internal architecture, design decisions, technical debt, and contribution guidance for `wafpass-core`. For user-facing documentation see `README.md`.
 
 > **BREAKING CHANGE:** `wafpass-server` endpoints are now under `/api/v1`. The CLI, wizard, and loader have been updated to call `/api/v1/auth/login`, `/api/v1/runs`, `/api/v1/controls`, `/api/v1/evidence`, etc.
 
