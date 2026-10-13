@@ -462,10 +462,17 @@ async def api_compliance_readiness():
             if has_evidence:
                 evidence_data[fw_name]['complete'] += 1
 
+    def _control_has_remediation(ctrl: dict) -> bool:
+        """True if at least one automated check has a non-empty remediation string."""
+        for check in ctrl.get('automated_checks', []):
+            if (check.get('remediation') or '').strip():
+                return True
+        return False
+
     # Controls missing remediation
     controls_without_remediation = [
         {'id': c['id'], 'title': c['title'], 'category': c.get('category', ''), 'severity': c.get('severity', '')}
-        for c in controls if not c.get('checks_count', 0) or c.get('description', '').strip() == ''
+        for c in controls if not _control_has_remediation(c)
     ]
 
     # Calculate metrics
@@ -482,11 +489,13 @@ async def api_compliance_readiness():
     else:
         evidence_completeness = 0
 
-    # Framework details
+    # Framework details: percentage of mapped controls whose evidence requirements
+    # are documented (has evidence.required in the control YAML).
     frameworks = []
     for fw_name, fw_data in fw_map.items():
         controls_len = len(fw_data['controls'])
-        pct = round(fw_data['mapped'] / controls_len * 100) if controls_len > 0 else 0
+        ed = evidence_data.get(fw_name, {'total': 0, 'complete': 0})
+        pct = round(ed['complete'] / ed['total'] * 100) if ed['total'] > 0 else 0
         frameworks.append({
             'name': fw_name,
             'description': fw_data['description'],
