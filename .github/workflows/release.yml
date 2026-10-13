@@ -110,7 +110,7 @@ jobs:
 
       # ── Run tests ─────────────────────────────────────────────────────────────
       - name: Install package + test deps
-        run: pip install ".[dev]"
+        run: pip install ".[dev,web]"
 
       - name: Test
         run: pytest
